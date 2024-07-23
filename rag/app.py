@@ -1,26 +1,54 @@
 import os
 import streamlit as st
-from langchain_cohere.llms import Cohere
+from langchain_community.llms import EdenAI
 from langchain_community.document_loaders import CSVLoader
-from langchain_cohere import CohereEmbeddings
+from langchain_community.embeddings.edenai import EdenAiEmbeddings
 from langchain_text_splitters import CharacterTextSplitter
 from langchain_pinecone import PineconeVectorStore
 from pinecone import Pinecone, ServerlessSpec
 import time
-from langchain.chains.question_answering import load_qa_chain
+from langchain.chains import RetrievalQA
+from langchain_core.prompts import PromptTemplate
 import streamlit.components.v1 as components
+import pandas as pd
+
 
 # Set environment variables
-os.environ["COHERE_API_KEY"] = "KzzamuEHYNDNBc65wgnxklRcngZA1agQC8UxOVu6"
+
 os.environ["PINECONE_API_KEY"] = "9957e36c-76fc-428c-a38d-e9dc9778ad56"
+EDENAI_API_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiMmI3NzU3ZWQtNmM2OC00MGZiLTk4Y2ItNzY4NWQ1MDA2YjE5IiwidHlwZSI6ImFwaV90b2tlbiJ9.OZmb2bq5MXIKZC9_BUXpaMrHyu3PjJ53nMrGlN7NV_s"
+llm = EdenAI(edenai_api_key=EDENAI_API_KEY, provider="openai", temperature=0, max_tokens=250)
+
+df = pd.read_csv("netflix_title.csv")
+
+# Remove the 'show_id' column
+df.drop(columns=['show_id','director','country','date_added'], inplace=True)
+
+# Convert the remaining columns to a text file
+with open("movie_postings.txt", "w") as f:
+    for i, row in df.iterrows():
+        heading = f"##Movie Detail: {i + 1}\n"
+        sentence = f"The {row['type']} {row['title']} has cast of {row['cast']} and was released on {row['release_year']} with rating {row['rating']}.It has a duration of {row['duration']} in the genere of {row['listed_in']}.Here is a liitle description about the movie {row['description']}\n"
+        f.write(heading)
+        f.write(sentence)
+        f.write("\n")
+
+file_path = "movie_postings.txt"
+print(f"File saved as {file_path}")
+
+# Read the text file and split into chunks based on ##
+with open(file_path, "r") as f:
+    content = f.read()
+
+textsplitter = [chunk for chunk in content.split("##") if chunk.strip()]
+
 
 # Initialize Cohere and Pinecone
-llm = Cohere()
-loader = CSVLoader("netflix_title.csv")
-documents = loader.load()
-text_splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=50)
-docs = text_splitter.split_documents(documents)
-embeddings = CohereEmbeddings()
+# loader = CSVLoader("netflix_title.csv")
+# documents = loader.load()
+# text_splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=50)
+# docs = text_splitter.split_documents(documents)
+embeddings = EdenAiEmbeddings(edenai_api_key=EDENAI_API_KEY, provider="openai")
 pc = Pinecone(api_key=os.environ["PINECONE_API_KEY"])
 
 # Create or use existing Pinecone index
@@ -30,7 +58,7 @@ existing_indexes = [index_info["name"] for index_info in pc.list_indexes()]
 if index_name not in existing_indexes:
     pc.create_index(
         name=index_name,
-        dimension=4096,
+        dimension=1536,
         metric="cosine",
         spec=ServerlessSpec(cloud="aws", region="us-east-1"),
     )
@@ -38,14 +66,28 @@ if index_name not in existing_indexes:
         time.sleep(1)
 
 index = pc.Index(index_name)
-docsearch = PineconeVectorStore.from_documents(docs, embeddings, index_name=index_name)
+docsearch = PineconeVectorStore.from_texts(textsplitter, embeddings, index_name=index_name)
 
-chain = load_qa_chain(llm, chain_type="stuff")
+# chain = load_qa_chain(llm, chain_type="stuff")
 
 def chatbot_response(query):
-    docs = docsearch.similarity_search(query, k=3)
-    answer = chain.run(input_documents=docs, question=query)
-    return answer
+    knowledge = PineconeVectorStore.from_existing_index(
+        index_name="rag-test",
+        embedding=EdenAiEmbeddings(edenai_api_key=EDENAI_API_KEY, provider="openai")
+    )
+    qa = RetrievalQA.from_chain_type(
+        llm=llm,
+        chain_type="stuff",
+        retriever=knowledge.as_retriever(search_type="mmr", top_k=3)
+    )
+    
+    prompt_template = PromptTemplate.from_template(
+        "Act as a movie reccomedation assistant and recommend movies based on user query which is {userquery}. "
+    )
+    query = prompt_template.format(userquery= user_input)
+    resultq = qa.invoke(query)
+    
+    return resultq['result']
 
 # Streamlit interface
 st.set_page_config(page_title="Movie Recommendation Chatbot", page_icon=":clapper:", layout="centered")
